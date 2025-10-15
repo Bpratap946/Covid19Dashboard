@@ -13,7 +13,6 @@ defaults:
 jobs:
   # -------------------------------------------------------------------------
   # JOB 1: TRIAGE - Runs when a new issue is opened.
-  # Analyzes the issue, labels it, and proposes an implementation plan.
   # -------------------------------------------------------------------------
   triage:
     runs-on: ubuntu-latest
@@ -49,6 +48,8 @@ jobs:
       - name: 'Analyze Issue & Generate Plan'
         id: gemini_analysis
         uses: 'google-github-actions/run-gemini-cli@main'
+        # ✅ DEBUG STEP 1: Continue even if this step fails so we can print the error.
+        continue-on-error: true
         with:
           gemini_api_key: '${{ secrets.GEMINI_API_KEY }}'
           gemini_model: 'gemini-1.5-flash-001'
@@ -77,7 +78,19 @@ jobs:
 
             **CRITICAL REQUIREMENT:** Your entire output must be ONLY the raw JSON object. Do not include any explanatory text, comments, or markdown code fences (like ```json) before or after the JSON.
 
+      # ✅ DEBUG STEP 2: This step runs ONLY if the step above failed. It prints the full error.
+      - name: 'Display Full Gemini Error Report on Failure'
+        if: steps.gemini_analysis.outcome == 'failure'
+        run: |
+          echo "::error title=Gemini Analysis Failed::The call to the Gemini API failed. See the full report below for details."
+          echo "----------------------- FULL ERROR REPORT -----------------------"
+          echo "${{ steps.gemini_analysis.outputs.gemini_errors }}"
+          echo "-----------------------------------------------------------------"
+          # Fail the workflow intentionally to stop further execution.
+          exit 1
+
       - name: 'Apply Labels and Post Plan'
+        # This step will be skipped if the error-printing step ran.
         uses: actions/github-script@v7
         with:
           script: |
@@ -85,69 +98,50 @@ jobs:
             const issueNumber = context.issue.number;
             let analysis;
 
+            // ✅ DEBUG STEP 3: Better error handling for JSON parsing.
+            if (!analysisJSON || analysisJSON.trim() === '') {
+              core.setFailed(`Gemini returned an empty response. Cannot proceed.`);
+              return;
+            }
             try {
               analysis = JSON.parse(analysisJSON);
             } catch (e) {
-              core.setFailed(`Failed to parse Gemini's JSON response. Error: ${e.message}. Response: ${analysisJSON}`);
+              core.setFailed(`Failed to parse Gemini's JSON response. Error: ${e.message}. Raw Response:\n${analysisJSON}`);
               return;
             }
 
-            // --- SECURE LABEL VALIDATION ---
             const availableLabels = '${{ steps.get_labels.outputs.available_labels }}'.split(',');
             const suggestedLabels = analysis.labels || [];
-            
-            // Filter Gemini's suggestions to only include labels that actually exist.
             const validLabels = suggestedLabels.filter(label => availableLabels.includes(label));
             
             if (validLabels.length > 0) {
-              try {
-                await github.rest.issues.addLabels({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issueNumber,
-                  labels: validLabels,
-                });
-                core.info(`Applied valid labels: ${validLabels.join(', ')}`);
-              } catch (error) {
-                core.warning(`Failed to apply labels: ${error.message}`);
-              }
-            } else {
-              core.info("Gemini did not suggest any valid labels to apply.");
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, labels: validLabels,
+              });
             }
 
-            // --- Post Implementation Plan ---
             const planBody = `
             🤖 **Triage Complete** (Powered by Gemini)
-
-            I've analyzed the request and the current codebase.
-
             ### 🏷️ Suggested Labels:
             ${validLabels.length > 0 ? validLabels.map(label => `- \`${label}\``).join('\n') : "None"}
-
             ### 📝 Proposed Implementation Plan:
             ${analysis.plan || "No implementation plan was generated."}
-
             ---
-            If this plan looks good, please respond with \`@gemini-cli implement\` to start the automated code generation and Pull Request process.
+            If this plan looks good, please respond with \`@gemini-cli implement\` to start the automated code generation.
             `;
-            
             await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issueNumber,
-              body: planBody
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, body: planBody
             });
 
   # -------------------------------------------------------------------------
-  # JOB 2: IMPLEMENT - Runs when a user confirms the plan with a command.
+  # JOB 2: IMPLEMENT - Runs when a user confirms the plan.
   # -------------------------------------------------------------------------
   implement:
     runs-on: ubuntu-latest
     permissions:
-      contents: write       # Required to push code to a new branch
-      pull-requests: write  # Required to create the Pull Request
-      issues: write         # Required to comment on the issue
-    
+      contents: write
+      pull-requests: write
+      issues: write
     if: |
       github.event_name == 'issue_comment' && 
       github.event.action == 'created' && 
@@ -156,14 +150,6 @@ jobs:
     steps:
       - name: 'Checkout Repository'
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref }}
-          fetch-depth: 0
-
-      - name: 'Setup Node.js'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
 
       - name: 'Install Gemini CLI'
         run: npm install -g @google/gemini-cli
@@ -172,51 +158,55 @@ jobs:
         id: gemini_code
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
           BRANCH_NAME: gemini-fix/issue-${{ github.event.issue.number }}
         run: |
           git checkout -b "${BRANCH_NAME}"
           echo "branch_name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
           
           echo "## Fetching code changes from Gemini..."
-          gemini "Based on the following GitHub Issue and the provided codebase in the current directory, generate the complete, ready-to-commit code changes to implement the fix/feature. Output only the content of the files that need to be created or modified. Use the standard file block format: \`\`\`{language}:{Title}:{filepath}\n...code...\n\`\`\`" > gemini_output.txt
+          # Improved prompt for more reliable code output
+          gemini "Your role is an expert software engineer. Based on the GitHub issue below and the repository code, generate the complete, ready-to-use code.
+          
+          **Issue Title:** ${{ github.event.issue.title }}
+          **Issue Body:** ${{ github.event.issue.body }}
+
+          **CRITICAL REQUIREMENT:** Output ONLY the code for the files that need to be created or modified. Use the standard file block format for each file:
+          \`\`\`language:Filename.extension
+          ... code content ...
+          \`\`\`" > gemini_output.txt
+
+          # ✅ DEBUG STEP 4: Print raw output from Gemini before parsing.
+          echo "--- Raw Gemini Code Output ---"
+          cat gemini_output.txt
+          echo "------------------------------"
 
           node -e "
             const fs = require('fs');
             const path = require('path');
-            
-            let filesWrittenCount = 0;
+            let filesWritten = false;
             try {
               const content = fs.readFileSync('gemini_output.txt', 'utf8');
-              const fileBlocks = content.match(/```[a-zA-Z]*:.*:.*\n([\s\S]*?)```/g);
-              
+              const fileBlocks = content.match(/```[a-zA-Z]*:([^\n]+)\n([\s\S]*?)```/g);
               if (!fileBlocks) {
-                console.log('No file blocks found. Skipping commit.');
-                process.stdout.write('files_written=false');
-                return;
+                console.log('No valid file blocks found in the output.');
+              } else {
+                fileBlocks.forEach(block => {
+                  const headerMatch = block.match(/```[a-zA-Z]*:([^\n]+)\n/);
+                  const filePath = headerMatch[1].trim();
+                  const code = block.replace(headerMatch[0], '').replace(/```$/, '').trim();
+                  
+                  const dir = path.dirname(filePath);
+                  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+                  
+                  fs.writeFileSync(filePath, code);
+                  console.log(\`✅ Wrote file: \${filePath}\`);
+                  filesWritten = true;
+                });
               }
-              
-              fileBlocks.forEach(block => {
-                const headerMatch = block.match(/```[a-zA-Z]*:(.*):(.*)\n/);
-                if (!headerMatch) return;
-
-                const filePath = headerMatch[2].trim();
-                const code = block.replace(/```[a-zA-Z]*:.*:.*\n/, '').replace(/```$/, '');
-                
-                const dir = path.dirname(filePath);
-                if (!fs.existsSync(dir)) {
-                  fs.mkdirSync(dir, { recursive: true });
-                }
-                
-                fs.writeFileSync(filePath, code);
-                console.log(\`✅ Wrote file: \${filePath}\`);
-                filesWrittenCount++;
-              });
             } catch (e) {
               console.error('❌ Error during file parsing/writing:', e.message);
             } finally {
-              process.stdout.write(\`files_written=\${filesWrittenCount > 0}\`);
+              console.log(\`files_written=\${filesWritten}\`);
             }
           " >> $GITHUB_OUTPUT
                   
@@ -229,11 +219,9 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action Bot (Gemini)"
           git add .
-          
           if ! git diff --staged --quiet; then
             git commit -m "feat(gemini): Implement fix for #${ISSUE_NUMBER}"
             git push origin ${BRANCH_NAME}
-            echo "✅ Code committed and pushed."
           else
             echo "⚠️ No file changes detected. Skipping commit."
             exit 1
@@ -246,23 +234,13 @@ jobs:
           BRANCH_NAME: ${{ steps.gemini_code.outputs.branch_name }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          PR_TITLE="🤖 Implemented: Fix/Feature for #${ISSUE_NUMBER}"
-          PR_BODY="Automated PR generated by the Gemini Action. Closes #${ISSUE_NUMBER}"
-          
           gh pr create \
             --base master \
             --head ${BRANCH_NAME} \
-            --title "${PR_TITLE}" \
-            --body "${PR_BODY}" \
+            --title "🤖 Implemented: Fix/Feature for #${ISSUE_NUMBER}" \
+            --body "Automated PR generated by the Gemini Action. Closes #${ISSUE_NUMBER}" \
             --repo ${{ github.repository }}
             
           PR_URL=$(gh pr list --head ${BRANCH_NAME} --json url -q '.[0].url' || true)
-          if [ -z "$PR_URL" ]; then
-            MESSAGE="⚠️ Code generation complete, but failed to create a Pull Request. Please check the logs."
-          else
-            MESSAGE="✅ Code generation complete! A Pull Request has been opened for your review: ${PR_URL}"
-          fi
-          
-          gh issue comment ${ISSUE_NUMBER} \
-            --body "${MESSAGE}" \
-            --repo ${{ github.repository }}
+          MESSAGE="✅ Code generation complete! A Pull Request has been opened: ${PR_URL}"
+          gh issue comment ${ISSUE_NUMBER} --body "${MESSAGE}" --repo ${{ github.repository }}
