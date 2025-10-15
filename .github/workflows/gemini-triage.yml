@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 7
     outputs:
       available_labels: '${{ steps.get_labels.outputs.available_labels }}'
-      selected_labels: '${{ env.SELECTED_LABELS }}'
+      selected_labels: '${{ steps.gemini_analysis.outputs.selected_labels }}'
     permissions:
       contents: 'read'
       id-token: 'write'
@@ -31,11 +31,8 @@ jobs:
     steps:
       - name: 'Get repository labels'
         id: 'get_labels'
-        uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea' # ratchet:actions/github-script@v7.0.1
+        uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea'
         with:
-          # NOTE: we intentionally do not use the given token. The default
-          # GITHUB_TOKEN provided by the action has enough permissions to read
-          # the labels.
           script: |-
             const { data: labels } = await github.rest.issues.listLabelsForRepo({
               owner: context.repo.owner,
@@ -55,9 +52,9 @@ jobs:
         id: 'gemini_analysis'
         if: |-
           ${{ steps.get_labels.outputs.available_labels != '' }}
-        uses: 'google-github-actions/run-gemini-cli@main' # ratchet:exclude
+        uses: 'google-github-actions/run-gemini-cli@v0'
         env:
-          GITHUB_TOKEN: '' # Do NOT pass any auth tokens here since this runs on untrusted inputs
+          GITHUB_TOKEN: ''
           ISSUE_TITLE: '${{ github.event.issue.title }}'
           ISSUE_BODY: '${{ github.event.issue.body }}'
           AVAILABLE_LABELS: '${{ steps.get_labels.outputs.available_labels }}'
@@ -76,7 +73,8 @@ jobs:
           settings: |-
             {
               "model": {
-                "maxSessionTurns": 25
+                "maxSessionTurns": 5,
+                "temperature": 0.1
               },
               "telemetry": {
                 "enabled": ${{ vars.GOOGLE_CLOUD_PROJECT != '' }},
@@ -84,11 +82,79 @@ jobs:
               },
               "tools": {
                 "core": [
-                  "run_shell_command(echo)"
+                  "run_shell_command(echo)",
+                  "run_shell_command(printenv)"
                 ]
               }
             }
-          prompt: '/gemini-triage'
+          prompt: |-
+            ## Role
+
+            You are an issue triage assistant. Analyze the current GitHub issue and identify the most appropriate existing labels.
+
+            ## Critical Instructions
+
+            1. You MUST output labels by writing to the GitHub Actions environment file
+            2. The file path is available in the GITHUB_OUTPUT environment variable
+            3. You MUST use the echo command to write: `echo "selected_labels=label1,label2,label3" >> "$GITHUB_OUTPUT"`
+            4. Only use labels from the available labels list provided below
+            5. Use comma-separated format with NO spaces between labels
+            6. When generating shell commands, you **MUST NOT** use command substitution with `$(...)`, `<(...)`, or `>(...)`.
+
+            ## Input Data
+
+            **Available Labels** (comma-separated):
+            ```
+            ${{ env.AVAILABLE_LABELS }}
+            ```
+
+            **Issue Title**:
+            ```
+            ${{ env.ISSUE_TITLE }}
+            ```
+
+            **Issue Body**:
+            ```
+            ${{ env.ISSUE_BODY }}
+            ```
+
+            ## Your Task
+
+            1. First, use `printenv` to see the GITHUB_OUTPUT variable value
+            
+            2. Review the issue title and body above
+            
+            3. From the available labels list, choose ALL appropriate labels that match this issue
+            
+            4. Write the selected labels to the output file using this EXACT command format:
+               ```bash
+               echo "selected_labels=bug,enhancement" >> "$GITHUB_OUTPUT"
+               ```
+               Replace "bug,enhancement" with your chosen labels (comma-separated, no spaces)
+            
+            5. If no labels are appropriate, write an empty string:
+               ```bash
+               echo "selected_labels=" >> "$GITHUB_OUTPUT"
+               ```
+
+            ## Examples
+
+            If the issue is about a bug in authentication:
+            ```bash
+            echo "selected_labels=bug,authentication" >> "$GITHUB_OUTPUT"
+            ```
+
+            If the issue is requesting a new feature:
+            ```bash
+            echo "selected_labels=enhancement,feature-request" >> "$GITHUB_OUTPUT"
+            ```
+
+            ## IMPORTANT
+
+            - DO NOT use any variables like ${GITHUB_OUTPUT} or ${GITHUB_ENV}
+            - USE the literal string "$GITHUB_OUTPUT" which will be expanded by the shell
+            - The output MUST be written to the file to be captured by GitHub Actions
+            - You MUST actually execute the echo command using the run_shell_command tool
 
   label:
     runs-on: 'ubuntu-latest'
@@ -105,7 +171,7 @@ jobs:
         id: 'mint_identity_token'
         if: |-
           ${{ vars.APP_ID }}
-        uses: 'actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b' # ratchet:actions/create-github-app-token@v2
+        uses: 'actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b'
         with:
           app-id: '${{ vars.APP_ID }}'
           private-key: '${{ secrets.APP_PRIVATE_KEY }}'
@@ -118,26 +184,24 @@ jobs:
           ISSUE_NUMBER: '${{ github.event.issue.number }}'
           AVAILABLE_LABELS: '${{ needs.triage.outputs.available_labels }}'
           SELECTED_LABELS: '${{ needs.triage.outputs.selected_labels }}'
-        uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea' # ratchet:actions/github-script@v7.0.1
+        uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea'
         with:
-          # Use the provided token so that the "gemini-cli" is the actor in the
-          # log for what changed the labels.
           github-token: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
           script: |-
-            // Parse the available labels
             const availableLabels = (process.env.AVAILABLE_LABELS || '').split(',')
               .map((label) => label.trim())
               .sort()
 
-            // Parse the label as a CSV, reject invalid ones - we do this just
-            // in case someone was able to prompt inject malicious labels.
             const selectedLabels = (process.env.SELECTED_LABELS || '').split(',')
               .map((label) => label.trim())
-              .filter((label) => availableLabels.includes(label))
+              .filter((label) => label && availableLabels.includes(label))
               .sort()
 
-            // Set the labels
             const issueNumber = process.env.ISSUE_NUMBER;
+            
+            core.info(`Available labels: ${availableLabels.join(', ')}`);
+            core.info(`Selected labels: ${selectedLabels.join(', ')}`);
+            
             if (selectedLabels && selectedLabels.length > 0) {
               await github.rest.issues.setLabels({
                 owner: context.repo.owner,
@@ -145,7 +209,7 @@ jobs:
                 issue_number: issueNumber,
                 labels: selectedLabels,
               });
-              core.info(`Successfully set labels: ${selectedLabels.join(',')}`);
+              core.info(`✅ Successfully set labels: ${selectedLabels.join(',')}`);
             } else {
-              core.info(`Failed to determine labels to set. There may not be enough information in the issue or pull request.`)
+              core.info(`⚠️ No valid labels to set. Selected: ${process.env.SELECTED_LABELS}`);
             }
