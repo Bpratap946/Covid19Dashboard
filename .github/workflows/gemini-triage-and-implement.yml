@@ -12,7 +12,7 @@ defaults:
 
 jobs:
   # -------------------------------------------------------------------------
-  # JOB 1: TRIAGE (REFACTORED) - Runs when a new issue is opened.
+  # JOB 1: TRIAGE - Runs when a new issue is opened.
   # Analyzes the issue, labels it, and proposes an implementation plan.
   # -------------------------------------------------------------------------
   triage:
@@ -29,7 +29,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # NEW STEP: Get all available labels from the repository first for validation.
       - name: 'Get repository labels'
         id: get_labels
         uses: actions/github-script@v7
@@ -47,32 +46,37 @@ jobs:
             core.info(`Found ${labelNames.length} available labels.`);
             return labelNames;
 
-      # REFACTORED STEP: Use the dedicated run-gemini-cli action.
       - name: 'Analyze Issue & Generate Plan'
         id: gemini_analysis
         uses: 'google-github-actions/run-gemini-cli@main'
         with:
-          # This example uses an API Key for simplicity. For production, it's recommended
-          # to switch to Workload Identity Federation as shown in the previous example.
           gemini_api_key: '${{ secrets.GEMINI_API_KEY }}'
-
-          # The prompt now includes the available labels as context.
+          gemini_model: 'gemini-1.5-flash-001'
           prompt: |
-            Analyze the codebase in the current directory against this GitHub Issue.
+            Your role is an expert software engineer triaging a GitHub issue. You have full access to the repository's file structure and content.
 
-            Issue Title: "${{ github.event.issue.title }}"
-            Issue Body: "${{ github.event.issue.body }}"
+            **ANALYSIS PROCESS:**
+            1.  **Understand the Goal:** First, read the issue title and body carefully to understand the user's intent. Is it a bug report, a feature request, or a documentation update?
+            2.  **Identify Key Components:** Based on the issue's text, identify keywords for components, functions, or UI elements (e.g., 'stats table', 'user login', 'API endpoint').
+            3.  **Locate Relevant Code:** Using these keywords, search the codebase to find the most relevant files. Focus your analysis primarily on these files to formulate a plan.
+            4.  **Formulate a Plan & Labels:** Based on your code analysis, create a step-by-step implementation plan and select the most appropriate labels.
 
-            Here is a comma-separated list of available labels for this repository:
-            ${{ steps.get_labels.outputs.available_labels }}
+            **GIVEN THE FOLLOWING CONTEXT:**
 
-            Your task is to provide a single, raw JSON object with two fields:
-            1. 'labels': An array of strings containing the most appropriate GitHub labels from the provided list.
-            2. 'plan': A detailed, numbered implementation plan to resolve the issue.
+            **1. GitHub Issue:**
+            - Title: "${{ github.event.issue.title }}"
+            - Body: "${{ github.event.issue.body }}"
 
-            Your entire output must be only the JSON object, with no other text, comments, or markdown formatting.
+            **2. Available Labels:**
+            - `${{ steps.get_labels.outputs.available_labels }}`
 
-      # REFACTORED STEP: Apply labels securely and post the plan.
+            **YOUR REQUIRED OUTPUT:**
+            You must provide a single, raw JSON object with two fields:
+            1.  `labels`: An array of strings containing appropriate labels selected ONLY from the "Available Labels" list above.
+            2.  `plan`: A detailed, step-by-step implementation plan written in markdown format.
+
+            **CRITICAL REQUIREMENT:** Your entire output must be ONLY the raw JSON object. Do not include any explanatory text, comments, or markdown code fences (like ```json) before or after the JSON.
+
       - name: 'Apply Labels and Post Plan'
         uses: actions/github-script@v7
         with:
@@ -136,7 +140,6 @@ jobs:
 
   # -------------------------------------------------------------------------
   # JOB 2: IMPLEMENT - Runs when a user confirms the plan with a command.
-  # This job remains the same as your original version.
   # -------------------------------------------------------------------------
   implement:
     runs-on: ubuntu-latest
