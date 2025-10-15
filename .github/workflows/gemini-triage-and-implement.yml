@@ -55,7 +55,7 @@ jobs:
           1. 'labels': An array of recommended GitHub labels (e.g., ['bug', 'enhancement', 'priority: high']).
           2. 'plan': A detailed, numbered implementation plan to resolve the issue.
 
-          Output only the JSON object." -o json) # <-- FIX: Changed --format to -o (shorthand for --output-format)
+          Output only the JSON object." -o json)
 
           # Pass the JSON output to the next step
           echo "analysis_json=${ANALYSIS}" >> $GITHUB_OUTPUT
