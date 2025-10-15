@@ -55,7 +55,7 @@ jobs:
           1. 'labels': An array of recommended GitHub labels (e.g., ['bug', 'enhancement', 'priority: high']).
           2. 'plan': A detailed, numbered implementation plan to resolve the issue.
 
-          Output only the JSON object." --format json)
+          Output only the JSON object." -o json) # <-- FIX: Changed --format to -o (shorthand for --output-format)
 
           # Pass the JSON output to the next step
           echo "analysis_json=${ANALYSIS}" >> $GITHUB_OUTPUT
@@ -169,92 +169,97 @@ jobs:
               // The non-greedy matching ensures we capture the entire block content, including new lines.
               const fileBlocks = content.match(/```[a-z]+:[^:\\n]+:([^:\\n]+)\n([\s\S]*?)/g);
               
-                        if (!fileBlocks || fileBlocks.length === 0) {
-                          console.log('No file blocks found in output. Skipping commit.');
-                          return;
-                        }
-              
-                        fileBlocks.forEach(block => {
-                          // Extract filepath from the header using a non-greedy match
-                          // Group 1 captures the filepath: \`\`\`lang:Title:(filepath)\n
-                          const headerMatch = block.match(/
-              
-              // Use a default empty string if match fails
-              const code = codeMatch ? codeMatch[1] : '';
-              
-                            // Ensure directory structure exists
-                            const dir = path.dirname(filePath);
-                            if (!fs.existsSync(dir)) {
-                              fs.mkdirSync(dir, { recursive: true });
-                            }
-              
-                            // Write the code to the file
-                            fs.writeFileSync(filePath, code);
-                            console.log(\`✅ Wrote file: \${filePath}\`);
-                            filesWrittenCount++;
-                          } else {
-                            console.warn('⚠️ Could not parse file header in block:', block.substring(0, 50) + '...');
-                          }
-                        });
-              
-                      } catch (e) {
-                        console.error('❌ Error during file parsing/writing:', e.message);
-                      } finally {
-                        // Output the result whether successful or failed
-                        console.log(\`files_written=\${filesWrittenCount > 0}\`);
+                      if (!fileBlocks || fileBlocks.length === 0) {
+                        console.log('No file blocks found in output. Skipping commit.');
+                        return;
                       }
-                    " >> $GITHUB_OUTPUT
               
-                - name: 'Commit and Push Changes'
-                  # Only proceed if files were successfully generated and written
-                  if: steps.gemini_code.outputs.files_written == 'true'
-                  env:
-                    BRANCH_NAME: ${{ steps.gemini_code.outputs.branch_name }}
-                    ISSUE_NUMBER: ${{ github.event.issue.number }}
-                  run: |
-                    git config --local user.email "action@github.com"
-                    git config --local user.name "GitHub Action Bot (Gemini)"
-                    git add .
+                      fileBlocks.forEach(block => {
+                        // Extract filepath from the header using a non-greedy match
+                        // Group 1 captures the filepath: \`\`\`lang:Title:(filepath)\n
+                        const headerMatch = block.match(/```[a-z]+:[^:\n]+:([^:\n]+)/);
+                        const filePath = headerMatch ? headerMatch[1].trim() : null;
+                        
+                        // Extract the code content between the header and the end-of-file marker.
+                        const codeMatch = block.match(/```[a-z]+:[^:\n]+:[^:\n]+\n([\s\S]*?)```eof/);
+                        
+                        if (filePath && codeMatch) {
+                          // Use a default empty string if match fails
+                          const code = codeMatch ? codeMatch[1] : '';
+                          
+                          // Ensure directory structure exists
+                          const dir = path.dirname(filePath);
+                          if (!fs.existsSync(dir)) {
+                            fs.mkdirSync(dir, { recursive: true });
+                          }
+                          
+                          // Write the code to the file
+                          fs.writeFileSync(filePath, code);
+                          console.log(\`✅ Wrote file: \${filePath}\`);
+                          filesWrittenCount++;
+                        } else {
+                          console.warn('⚠️ Could not parse file header in block:', block.substring(0, 50) + '...');
+                        }
+                      });
               
-                    # Only commit if there are changes staged
-                    if ! git diff --staged --quiet; then
-                      git commit -m "feat(gemini): Implement fix for #${ISSUE_NUMBER}"
-                      git push origin ${BRANCH_NAME}
-                      echo "✅ Code committed and pushed."
-                    else
-                      echo "⚠️ No file changes detected. Skipping commit."
-                      # Exit code 1 ensures the subsequent steps that depend on code writing also skip.
-                      exit 1
-                    fi
-              
-                - name: 'Create Pull Request'
-                  # Only proceed if the commit and push step was successful (implied by no exit 1 from previous step)
-                  if: steps.gemini_code.outputs.files_written == 'true'
-                  env:
-                    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                    BRANCH_NAME: ${{ steps.gemini_code.outputs.branch_name }}
-                    ISSUE_NUMBER: ${{ github.event.issue.number }}
-                  run: |
-                    PR_TITLE="🤖 Implemented: Fix/Feature for #${ISSUE_NUMBER}"
-                    PR_BODY="Automated PR generated by the Gemini Action.
-              Closes #${ISSUE_NUMBER}"
-              
-                    # Use 'gh pr create' to make the PR
-                    gh pr create \
-                      --base master \
-                      --head ${BRANCH_NAME} \
-                      --title "${PR_TITLE}" \
-                      --body "${PR_BODY}" \
-                      --repo ${{ github.repository }}
-                    
-                    # Add a comment to the original issue linking the PR
-                    PR_URL=$(gh pr list --head ${BRANCH_NAME} --json url -q '.[0].url' || true)
-                    if [ -z "$PR_URL" ]; then
-                      MESSAGE="⚠️ Code generation complete, but failed to create a Pull Request. Please check the logs."
-                    else
-                      MESSAGE="✅ Code generation complete! A Pull Request has been opened for your review: ${PR_URL}"
-                    fi
-              
-                    gh issue comment ${ISSUE_NUMBER} \
-                      --body "${MESSAGE}" \
-                      --repo ${{ github.repository }}
+                    } catch (e) {
+                      console.error('❌ Error during file parsing/writing:', e.message);
+                    } finally {
+                      // Output the result whether successful or failed
+                      console.log(\`files_written=\${filesWrittenCount > 0}\`);
+                    }
+                  " >> $GITHUB_OUTPUT
+                  
+      - name: 'Commit and Push Changes'
+        # Only proceed if files were successfully generated and written
+        if: steps.gemini_code.outputs.files_written == 'true'
+        env:
+          BRANCH_NAME: ${{ steps.gemini_code.outputs.branch_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action Bot (Gemini)"
+          git add .
+          
+          # Only commit if there are changes staged
+          if ! git diff --staged --quiet; then
+            git commit -m "feat(gemini): Implement fix for #${ISSUE_NUMBER}"
+            git push origin ${BRANCH_NAME}
+            echo "✅ Code committed and pushed."
+          else
+            echo "⚠️ No file changes detected. Skipping commit."
+            # Exit code 1 ensures the subsequent steps that depend on code writing also skip.
+            exit 1
+          fi
+          
+      - name: 'Create Pull Request'
+        # Only proceed if the commit and push step was successful (implied by no exit 1 from previous step)
+        if: steps.gemini_code.outputs.files_written == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH_NAME: ${{ steps.gemini_code.outputs.branch_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          PR_TITLE="🤖 Implemented: Fix/Feature for #${ISSUE_NUMBER}"
+          PR_BODY="Automated PR generated by the Gemini Action.
+          Closes #${ISSUE_NUMBER}"
+          
+          # Use 'gh pr create' to make the PR
+          gh pr create \
+            --base master \
+            --head ${BRANCH_NAME} \
+            --title "${PR_TITLE}" \
+            --body "${PR_BODY}" \
+            --repo ${{ github.repository }}
+            
+          # Add a comment to the original issue linking the PR
+          PR_URL=$(gh pr list --head ${BRANCH_NAME} --json url -q '.[0].url' || true)
+          if [ -z "$PR_URL" ]; then
+            MESSAGE="⚠️ Code generation complete, but failed to create a Pull Request. Please check the logs."
+          else
+            MESSAGE="✅ Code generation complete! A Pull Request has been opened for your review: ${PR_URL}"
+          fi
+          
+          gh issue comment ${ISSUE_NUMBER} \
+            --body "${MESSAGE}" \
+            --repo ${{ github.repository }}
