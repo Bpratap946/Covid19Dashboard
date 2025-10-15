@@ -88,7 +88,7 @@ class About extends Component {
         <div className="container">
           <div className="about-container">
             <h1 className="about-title">About</h1>
-            <p className="about-description">Last update on march 28th 2021.</p>
+            <p className="about-description">Last update on Jan 12th 2025.</p>
             <p className="about-vaccine-title">
               COVID-19 vaccines be ready for distribution
             </p>
